@@ -6,15 +6,14 @@ import type {
 	CorsairErrorHandler,
 	CorsairPlugin,
 	CorsairPluginContext,
-	CorsairWebhook,
 	KeyBuilderContext,
 	PickAuth,
 	PluginPermissionsConfig,
 	RequiredPluginEndpointMeta,
+	RequiredPluginWebhookSchemas,
 } from 'corsair/core';
-import { AuthMissingError } from 'corsair/core';
+import { AuthMissingError, getOAuthAccessToken } from 'corsair/core';
 import { attachManagedRefreshAuth, getManagedAccessToken } from 'corsair/hub';
-import { getValidAccessToken } from './client';
 import {
 	Albums,
 	Artists,
@@ -34,10 +33,7 @@ import {
 } from './endpoints/types';
 import { errorHandlers } from './error-handlers';
 import { SpotifySchema } from './schema';
-import { ExampleWebhooks } from './webhooks';
 import { matchSpotifyTenantWebhook } from './webhooks/tenant-matcher';
-import type { ExampleEvent, SpotifyWebhookOutputs } from './webhooks/types';
-import { ExampleEventSchema } from './webhooks/types';
 
 /**
  * Plugin options type - configure authentication and behavior
@@ -118,14 +114,11 @@ export type SpotifyEndpoints = {
 	tracksSearch: SpotifyEndpoint<'tracksSearch'>;
 };
 
-type SpotifyWebhook<
-	K extends keyof SpotifyWebhookOutputs,
-	TEvent,
-> = CorsairWebhook<SpotifyContext, TEvent, SpotifyWebhookOutputs[K]>;
-
-export type SpotifyWebhooks = {
-	example: SpotifyWebhook<'example', ExampleEvent>;
-};
+/**
+ * Spotify does not offer a public webhook API, so there are no triggers to
+ * register. See https://github.com/spotify/web-api/issues/538
+ */
+export type SpotifyWebhooks = Record<string, never>;
 
 export type SpotifyBoundWebhooks = BindWebhooks<SpotifyWebhooks>;
 
@@ -299,19 +292,12 @@ export const spotifyEndpointSchemas = {
 	},
 } as const;
 
-const spotifyWebhooksNested = {
-	example: {
-		example: ExampleWebhooks.example,
-	},
-} as const;
+const spotifyWebhooksNested = {} as const;
 
-const spotifyWebhookSchemas = {
-	'example.example': {
-		description: 'An example Spotify webhook event',
-		payload: ExampleEventSchema,
-		response: ExampleEventSchema,
-	},
-} as const;
+const spotifyWebhookSchemas =
+	{} as const satisfies RequiredPluginWebhookSchemas<
+		typeof spotifyWebhooksNested
+	>;
 
 const defaultAuthType: AuthTypes = 'oauth_2';
 
@@ -479,26 +465,8 @@ export function spotify<const T extends SpotifyPluginOptions>(
 		endpointMeta: spotifyEndpointMeta,
 		endpointSchemas: spotifyEndpointSchemas,
 		webhookSchemas: spotifyWebhookSchemas,
-		/**
-		 * Webhook matcher function - determines if an incoming request is a webhook for this plugin
-		 *
-		 * WEBHOOK CONFIGURATION:
-		 * Update this to check for headers that identify your provider's webhooks.
-		 * Common patterns:
-		 * - Check for signature headers (e.g., 'x-spotify-signature')
-		 * - Check for user-agent strings
-		 * - Check for specific path patterns
-		 *
-		 * Example for multiple headers:
-		 * pluginWebhookMatcher: (request) => {
-		 *   const headers = request.headers;
-		 *   return 'x-spotify-signature' in headers && 'x-spotify-timestamp' in headers;
-		 * },
-		 */
-		pluginWebhookMatcher: (request) => {
-			const headers = request.headers;
-			return 'x-spotify-signature' in headers || 'spotify-webhook' in headers;
-		},
+		// Spotify has no public webhook API, so never claim incoming webhook traffic.
+		pluginWebhookMatcher: () => false,
 		pluginTenantWebhookMatcher: matchSpotifyTenantWebhook,
 		errorHandlers: {
 			...errorHandlers,
@@ -562,52 +530,11 @@ export function spotify<const T extends SpotifyPluginOptions>(
 			}
 
 			if (source === 'endpoint' && ctx.authType === 'oauth_2') {
-				const accessToken = await ctx.keys.get_access_token();
-				const refreshToken = await ctx.keys.get_refresh_token();
-
-				if (!refreshToken) {
-					throw new AuthMissingError('spotify', 'oauth_2');
-				}
-
-				const res = await ctx.keys.get_integration_credentials();
-
-				if (!res.client_id || !res.client_secret) {
-					throw new Error('[corsair:spotify] No client id or client secret');
-				}
-
-				try {
-					const key = await getValidAccessToken({
-						accessToken,
-						refreshToken,
-						clientId: res.client_id,
-						clientSecret: res.client_secret,
-					});
-
-					if (!key) {
-						throw new Error(
-							'[corsair:spotify] Access token cannot be created.',
-						);
-					}
-
-					(ctx as Record<string, unknown>)._refreshAuth = async () => {
-						const freshToken = await getValidAccessToken({
-							accessToken: null,
-							refreshToken,
-							clientId: res.client_id!,
-							clientSecret: res.client_secret!,
-						});
-						if (freshToken) {
-							await ctx.keys.set_access_token(freshToken);
-						}
-						return freshToken || '';
-					};
-
-					return key;
-				} catch (error) {
-					throw new Error(
-						`[corsair:spotify] Failed to get access token: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
+				return getOAuthAccessToken(ctx, {
+					plugin: 'spotify',
+					tokenUrl: 'https://accounts.spotify.com/api/token',
+					tokenAuthMethod: 'basic',
+				});
 			}
 
 			if (ctx.authType === 'managed') {
@@ -638,10 +565,7 @@ export function spotify<const T extends SpotifyPluginOptions>(
 // Webhook Type Exports
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type {
-	ExampleEvent,
-	SpotifyWebhookOutputs,
-} from './webhooks/types';
+export type { SpotifyWebhookOutputs } from './webhooks/types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Endpoint Type Exports
